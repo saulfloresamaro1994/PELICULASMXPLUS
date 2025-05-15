@@ -324,7 +324,7 @@
             background: #0052cc;
         }
 
-        /* Movie info container */
+        /* Contenedor de información */
         #movieInfo {
             margin-top: 0;
             padding: 0;
@@ -602,29 +602,11 @@
         const tmdbApiKey = 'e22418df765186e2208cf44bef9e3bd2';
         const localServerUrl = 'http://192.168.1.67:8081';
         const remoteServerUrl = 'http://mxcuentas.ddns.net:8081';
+        
+        // Usar proxy para evitar CORS
+        const corsProxyUrl = 'https://cors-anywhere.herokuapp.com/';
         let serverUrl = localServerUrl;
         const parentFolderId = '75892f06ac33a7de6ed03b383818d7ad';
-
-        // Función proxy para CORS
-        async function fetchWithCorsProxy(url) {
-            // Si es una URL local o ya incluye el proxy, hacer fetch directo
-            if (url.includes(localServerUrl) || url.includes(remoteServerUrl) || url.includes('cors-anywhere')) {
-                return fetch(url);
-            }
-            
-            const proxyUrl = 'https://cors-anywhere.herokuapp.com/';
-            try {
-                const response = await fetch(proxyUrl + url, {
-                    headers: {
-                        'X-Requested-With': 'XMLHttpRequest'
-                    }
-                });
-                return response;
-            } catch (error) {
-                console.error('Error con proxy CORS:', error);
-                return fetch(url); // Fallback
-            }
-        }
 
         // Variables de estado
         let tmdbCache = {};
@@ -636,6 +618,32 @@
         let isFirstLoad = true;
         let allMovies = [];
         let filteredMovies = [];
+
+        // Función para hacer requests con proxy
+        async function fetchWithProxy(url, options = {}) {
+            // No usar proxy para imágenes (no funciona bien con CORS Anywhere)
+            if (url.includes('/Images/') || url.includes('image.tmdb.org')) {
+                return fetch(url, options);
+            }
+            
+            try {
+                const proxyUrl = corsProxyUrl + url;
+                const response = await fetch(proxyUrl, {
+                    ...options,
+                    headers: {
+                        ...options.headers,
+                        'X-Requested-With': 'XMLHttpRequest' // Necesario para CORS Anywhere
+                    }
+                });
+                
+                if (!response.ok) throw new Error('Network response was not ok');
+                return response;
+            } catch (error) {
+                console.error('Proxy fetch failed, trying direct:', error);
+                // Fallback a fetch directo si el proxy falla
+                return fetch(url, options);
+            }
+        }
 
         // Inicialización
         document.addEventListener('DOMContentLoaded', async () => {
@@ -663,7 +671,7 @@
         async function testLocalConnection() {
             showLoading();
             try {
-                const response = await fetchWithCorsProxy(`${localServerUrl}/System/Info/Public?api_key=${embyApiKey}`);
+                const response = await fetchWithProxy(`${localServerUrl}/System/Info/Public?api_key=${embyApiKey}`);
                 if (response.ok) {
                     serverUrl = localServerUrl;
                 } else {
@@ -681,24 +689,37 @@
             const cachedData = localStorage.getItem(cacheKey);
 
             try {
-                const response = await fetchWithCorsProxy(`${serverUrl}/Items?Recursive=true&IncludeItemTypes=Movie&SortBy=PremiereDate,ProductionYear,SortName&SortOrder=Descending,Descending,Ascending&ParentId=${parentFolderId}&Fields=Genres,GenreItems,PremiereDate&api_key=${embyApiKey}`);
+                // Cambiar el orden para usar PremiereDate primero
+                const response = await fetchWithProxy(`${serverUrl}/Items?Recursive=true&IncludeItemTypes=Movie&SortBy=PremiereDate,ProductionYear,SortName&SortOrder=Descending,Descending,Ascending&ParentId=${parentFolderId}&Fields=Genres,GenreItems,PremiereDate&api_key=${embyApiKey}`);
                 const data = await response.json();
                 
                 if (data.Items) {
+                    // Ordenar las películas con lógica mejorada
                     allMovies = data.Items.sort((a, b) => {
+                        // Usar PremiereDate si está disponible
                         const dateA = a.PremiereDate ? new Date(a.PremiereDate) : null;
                         const dateB = b.PremiereDate ? new Date(b.PremiereDate) : null;
                         
+                        // Si ambas tienen fecha, comparar
                         if (dateA && dateB) return dateB - dateA;
                         
+                        // Si solo una tiene fecha, esa va primero
                         if (dateA && !dateB) return -1;
                         if (!dateA && dateB) return 1;
                         
+                        // Si no hay fechas, usar ProductionYear
                         const yearA = a.ProductionYear || 0;
                         const yearB = b.ProductionYear || 0;
                         if (yearA !== yearB) return yearB - yearA;
                         
+                        // Si todo lo demás es igual, ordenar por nombre
                         return a.Name.localeCompare(b.Name);
+                    });
+                    
+                    // Depuración: mostrar las 5 películas más recientes
+                    console.log("Películas ordenadas:");
+                    allMovies.slice(0, 5).forEach(m => {
+                        console.log(`- ${m.Name} (${m.PremiereDate || m.ProductionYear || 'sin fecha'})`);
                     });
                     
                     filteredMovies = [...allMovies];
@@ -717,6 +738,7 @@
                 console.error('Error al cargar películas:', error);
                 if (cachedData) {
                     const data = JSON.parse(cachedData);
+                    // Aplicar el mismo ordenamiento a los datos en caché
                     allMovies = (data.Items || []).sort((a, b) => {
                         const dateA = a.PremiereDate ? new Date(a.PremiereDate) : null;
                         const dateB = b.PremiereDate ? new Date(b.PremiereDate) : null;
@@ -751,11 +773,13 @@
                 itemDiv.className = 'movie';
                 itemDiv.setAttribute('data-id', item.Id);
                 
+                // Obtener géneros para los atributos data
                 const genres = item.GenreItems ? item.GenreItems.map(g => g.Name) : (item.Genres || []);
                 itemDiv.setAttribute('data-genres', genres.join(','));
                 itemDiv.setAttribute('data-year', item.ProductionYear || '');
                 itemDiv.setAttribute('data-rating', item.CommunityRating || '0');
                 
+                // Extraer año y calificación para mostrar
                 const year = item.PremiereDate 
                     ? new Date(item.PremiereDate).getFullYear() 
                     : (item.ProductionYear || 'N/A');
@@ -776,6 +800,7 @@
                 contentDiv.appendChild(itemDiv);
             });
 
+            // Agregar eventos a los botones
             document.querySelectorAll('.play-btn').forEach(btn => {
                 btn.addEventListener('click', (e) => {
                     const itemId = e.currentTarget.getAttribute('data-id');
@@ -795,10 +820,13 @@
             const activeFilter = document.querySelector('.filter-btn.active')?.dataset.filter || 'all';
             
             filteredMovies = allMovies.filter(movie => {
+                // Filtrar por término de búsqueda
                 const matchesSearch = movie.Name.toLowerCase().includes(searchTerm);
                 
+                // Filtrar por categoría (si no es "all")
                 let matchesFilter = true;
                 if (activeFilter !== 'all') {
+                    // Verificar si la película tiene el género buscado
                     if (movie.GenreItems && movie.GenreItems.length > 0) {
                         matchesFilter = movie.GenreItems.some(genre => 
                             genre.Name.toLowerCase().includes(activeFilter.toLowerCase())
@@ -815,6 +843,7 @@
                 return matchesSearch && matchesFilter;
             });
             
+            // Mantener el ordenamiento
             filteredMovies.sort((a, b) => {
                 const dateA = a.PremiereDate ? new Date(a.PremiereDate) : null;
                 const dateB = b.PremiereDate ? new Date(b.PremiereDate) : null;
@@ -827,6 +856,7 @@
                 return a.Name.localeCompare(b.Name);
             });
             
+            // Mostrar resultados
             displayItems();
         }
 
@@ -839,15 +869,59 @@
         // Funciones del reproductor
         async function playItem(itemId, movieName, productionYear) {
             showLoading();
+            
+            // Usar URL directa para el video (no funciona con proxy)
             const videoUrl = `${serverUrl}/Items/${itemId}/Download?api_key=${embyApiKey}`;
             const videoPlayer = document.getElementById('videoPlayer');
             
-            videoPlayer.src = videoUrl;
+            // Intentar con MediaSource para evitar problemas de CORS
+            try {
+                if ('MediaSource' in window) {
+                    const mediaSource = new MediaSource();
+                    videoPlayer.src = URL.createObjectURL(mediaSource);
+                    
+                    mediaSource.addEventListener('sourceopen', async () => {
+                        try {
+                            const response = await fetch(videoUrl, {
+                                headers: {
+                                    'Accept': 'video/*'
+                                }
+                            });
+                            
+                            if (!response.ok) throw new Error('Network response was not ok');
+                            
+                            const sourceBuffer = mediaSource.addSourceBuffer(response.headers.get('content-type') || 'video/mp4');
+                            const reader = response.body.getReader();
+                            
+                            while (true) {
+                                const { done, value } = await reader.read();
+                                if (done) {
+                                    mediaSource.endOfStream();
+                                    break;
+                                }
+                                sourceBuffer.appendBuffer(value);
+                            }
+                        } catch (error) {
+                            console.error('Error con MediaSource:', error);
+                            // Fallback a método tradicional
+                            videoPlayer.src = videoUrl;
+                        }
+                    });
+                } else {
+                    // Fallback tradicional
+                    videoPlayer.src = videoUrl;
+                }
+            } catch (error) {
+                console.error('Error al cargar video:', error);
+                videoPlayer.src = videoUrl;
+            }
             
+            // Configurar información básica
             document.getElementById('movieTitle').textContent = movieName;
             document.getElementById('movieYear').textContent = productionYear || 'Año no disponible';
             document.getElementById('moviePoster').src = `${serverUrl}/Items/${itemId}/Images/Primary?maxHeight=300&maxWidth=200&quality=90&api_key=${embyApiKey}`;
             
+            // Limpiar otros campos mientras cargamos
             document.getElementById('movieRuntime').textContent = 'Cargando...';
             document.getElementById('movieRating').textContent = 'Cargando...';
             document.getElementById('movieGenres').innerHTML = '';
@@ -856,10 +930,12 @@
             document.getElementById('player').style.display = 'flex';
             hideLoading();
 
+            // Intentar autoplay (puede fallar por políticas del navegador)
             const playPromise = videoPlayer.play();
             
             if (playPromise !== undefined) {
                 playPromise.catch(error => {
+                    // Mostrar botón de play si el autoplay falla
                     const playButton = document.createElement('button');
                     playButton.className = 'play-button';
                     playButton.innerHTML = '<i class="fas fa-play"></i> Reproducir Película';
@@ -871,6 +947,7 @@
                 });
             }
 
+            // Obtener datos detallados de TMDB
             try {
                 const tmdbData = await getTmdbData(movieName, productionYear);
                 if (tmdbData) {
@@ -892,11 +969,13 @@
             document.querySelector('.player-container').style.display = 'block';
             currentMovieTmdbId = null;
             
+            // Limpiar cualquier botón de play que pueda existir
             const existingPlayButton = document.querySelector('.play-button');
             if (existingPlayButton) {
                 existingPlayButton.remove();
             }
             
+            // Limpiar conexiones cuando se cierra el reproductor
             if (socketConnection) {
                 socketConnection.close();
                 socketConnection = null;
@@ -906,6 +985,7 @@
                 updateCheckInterval = null;
             }
             
+            // Volver a iniciar la detección de cambios
             startUpdateDetection();
         }
 
@@ -913,22 +993,27 @@
         async function getTmdbData(movieName, year) {
             const cacheKey = `tmdb_${movieName.toLowerCase().replace(/[^a-z0-9]/g, '')}_${year}`;
             
+            // Verificar caché primero
             if (tmdbCache[cacheKey]) {
                 return tmdbCache[cacheKey];
             }
             
             try {
+                // Buscar la película en TMDB
                 const searchUrl = `https://api.themoviedb.org/3/search/movie?api_key=${tmdbApiKey}&query=${encodeURIComponent(movieName)}${year ? `&year=${year}` : ''}&language=es`;
-                const searchResponse = await fetchWithCorsProxy(searchUrl);
+                const searchResponse = await fetchWithProxy(searchUrl);
                 const searchData = await searchResponse.json();
                 
                 if (searchData.results && searchData.results.length > 0) {
+                    // Tomar el primer resultado (el más relevante)
                     const movieId = searchData.results[0].id;
                     
+                    // Obtener detalles completos en español
                     const detailsUrl = `https://api.themoviedb.org/3/movie/${movieId}?api_key=${tmdbApiKey}&language=es&append_to_response=release_dates`;
-                    const detailsResponse = await fetchWithCorsProxy(detailsUrl);
+                    const detailsResponse = await fetchWithProxy(detailsUrl);
                     const detailsData = await detailsResponse.json();
                     
+                    // Almacenar en caché
                     tmdbCache[cacheKey] = detailsData;
                     localStorage.setItem('tmdbCache', JSON.stringify(tmdbCache));
                     
@@ -942,6 +1027,7 @@
         }
 
         function updateMovieInfo(tmdbData) {
+            // Actualizar la información con datos de TMDB
             document.getElementById('movieTitle').textContent = tmdbData.title || 'Sin título';
             
             const releaseYear = tmdbData.release_date ? new Date(tmdbData.release_date).getFullYear() : 'N/A';
@@ -961,6 +1047,7 @@
             const overview = tmdbData.overview || 'Descripción no disponible';
             document.getElementById('movieOverview').textContent = overview;
             
+            // Actualizar el poster si hay uno mejor en TMDB
             if (tmdbData.poster_path) {
                 document.getElementById('moviePoster').src = `https://image.tmdb.org/t/p/w200${tmdbData.poster_path}`;
             }
@@ -977,6 +1064,14 @@
 
         // Funciones de actualización
         function startUpdateDetection() {
+            // WebSocket no funcionará a través de proxy, así que lo deshabilitamos para GitHub Pages
+            if (window.location.host.includes('github.io')) {
+                console.log("WebSocket deshabilitado en GitHub Pages");
+                setupPolling();
+                return;
+            }
+            
+            // Primero intentar con WebSocket
             try {
                 setupWebSocket();
             } catch (e) {
@@ -1007,6 +1102,7 @@
             
             socketConnection.onerror = function(error) {
                 console.error('Error en WebSocket:', error);
+                // Fallback a polling si WebSocket falla
                 if (!updateCheckInterval) {
                     setupPolling();
                 }
@@ -1014,6 +1110,7 @@
             
             socketConnection.onclose = function() {
                 console.log("Conexión WebSocket cerrada");
+                // Reintentar después de 30 segundos
                 setTimeout(setupWebSocket, 30000);
             };
         }
@@ -1021,14 +1118,14 @@
         function setupPolling() {
             if (!updateCheckInterval) {
                 console.log("Iniciando verificación periódica de cambios");
-                updateCheckInterval = setInterval(checkForUpdates, 300000);
-                checkForUpdates();
+                updateCheckInterval = setInterval(checkForUpdates, 300000); // 5 minutos
+                checkForUpdates(); // Ejecutar inmediatamente
             }
         }
 
         async function checkForUpdates() {
             try {
-                const response = await fetchWithCorsProxy(`${serverUrl}/Library/Refresh?api_key=${embyApiKey}`);
+                const response = await fetchWithProxy(`${serverUrl}/Library/Refresh?api_key=${embyApiKey}`);
                 const data = await response.json();
                 
                 if (!lastUpdateTime || new Date(data.LastUpdated) > new Date(lastUpdateTime)) {
@@ -1046,6 +1143,7 @@
             const notification = document.getElementById('updateNotification');
             notification.style.display = 'flex';
             
+            // Ocultar después de 10 segundos si no se hace clic
             setTimeout(() => {
                 if (notification.style.display === 'flex') {
                     notification.style.display = 'none';
